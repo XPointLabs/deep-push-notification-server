@@ -29,7 +29,7 @@ public sealed class FirebasePushProvider(FirebaseAdmin.FirebaseApp app) : IPushP
             {
                 Token = subscription.DeviceToken,
                 Data = payload,
-                Android = new AndroidConfig { Priority = Priority.High, TimeToLive = TimeSpan.FromDays(30) }
+                Android = new AndroidConfig { Priority = Priority.High, TimeToLive = TimeSpan.FromDays(28) }
             }, cancellationToken);
             return new(true, false, messageId);
         }
