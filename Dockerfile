@@ -7,7 +7,7 @@ COPY src/Deep.Push.Server/ src/Deep.Push.Server/
 RUN dotnet publish src/Deep.Push.Server/Deep.Push.Server.csproj -c Release -o /app --no-restore /p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine
-RUN apk add --no-cache curl libsodium
+RUN apk add --no-cache curl krb5-libs libsodium
 WORKDIR /app
 COPY --from=build /app ./
 USER $APP_UID
