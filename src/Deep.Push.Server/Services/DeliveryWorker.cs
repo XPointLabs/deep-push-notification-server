@@ -53,7 +53,15 @@ public sealed class DeliveryWorker(
             {
                 delivery.Status = DeliveryStatus.Failed;
                 delivery.LastError = result.Error;
-                if (result.PermanentFailure) db.Subscriptions.Remove(delivery.Subscription);
+                if (result.PermanentFailure)
+                {
+                    delivery.Subscription.ExpiresAt = now;
+                }
+                logger.LogWarning(
+                    "Push delivery {DeliveryId} failed after {Attempts} attempts: {ProviderError}",
+                    delivery.Id,
+                    delivery.Attempts,
+                    result.Error);
             }
             else
             {

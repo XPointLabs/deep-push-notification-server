@@ -43,6 +43,11 @@ public sealed class PushProtocolTests
         Assert.Equal(1, await service.QueueNotificationAsync(notification, default));
         Assert.Equal(0, await service.QueueNotificationAsync(notification, default));
         Assert.Single(await db.Deliveries.ToListAsync());
+
+        var renewed = Assert.IsType<OperationResponse>(await service.SubscribeAsync(JsonSerializer.SerializeToElement(request), default));
+        Assert.True(renewed.Success);
+        Assert.False(renewed.Added);
+        Assert.True((await db.Subscriptions.SingleAsync()).ExpiresAt > now);
     }
 
     [Fact]
