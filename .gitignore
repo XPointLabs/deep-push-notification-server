@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.json.user
+secrets/
+firebase-service-account.json
+network-*-firebase-adminsdk-*.json

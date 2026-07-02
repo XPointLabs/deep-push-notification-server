@@ -1,0 +1,6 @@
+@Deep.Push.Server_HostAddress = http://localhost:5244
+
+GET {{Deep.Push.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

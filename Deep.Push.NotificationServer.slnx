@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Deep.Push.Server/Deep.Push.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Deep.Push.Server.Tests/Deep.Push.Server.Tests.csproj" />
+  </Folder>
+</Solution>
