@@ -28,6 +28,14 @@ public sealed class DeliveryWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<PushDbContext>();
         var now = timeProvider.GetUtcNow();
+        await db.Deliveries
+            .Where(x => x.Status == DeliveryStatus.Sending && x.NextAttemptAt <= now)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(x => x.Status, DeliveryStatus.Retry)
+                    .SetProperty(x => x.NextAttemptAt, now),
+                cancellationToken);
+
         var deliveries = await db.Deliveries
             .Include(x => x.Subscription)
             .Where(x => (x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Retry) && x.NextAttemptAt <= now)
@@ -37,40 +45,70 @@ public sealed class DeliveryWorker(
 
         foreach (var delivery in deliveries)
         {
-            delivery.Status = DeliveryStatus.Sending;
-            delivery.Attempts++;
-            await db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                delivery.Status = DeliveryStatus.Sending;
+                delivery.Attempts++;
+                delivery.NextAttemptAt = now.AddMinutes(5);
+                await db.SaveChangesAsync(cancellationToken);
 
-            var result = await provider.SendAsync(delivery.Subscription, encoder.Encode(delivery.Subscription, delivery), cancellationToken);
-            if (result.Success)
-            {
-                delivery.Status = DeliveryStatus.Delivered;
-                delivery.DeliveredAt = now;
-                delivery.ProviderMessageId = result.MessageId;
-                delivery.LastError = null;
+                var payload = encoder.Encode(delivery.Subscription, delivery);
+                var result = await provider.SendAsync(delivery.Subscription, payload, cancellationToken);
+                ApplyProviderResult(delivery, result, now);
             }
-            else if (result.PermanentFailure || delivery.Attempts >= options.Value.MaxAttempts)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                delivery.Status = DeliveryStatus.Failed;
-                delivery.LastError = result.Error;
-                if (result.PermanentFailure)
-                {
-                    delivery.Subscription.ExpiresAt = now;
-                }
+                throw;
+            }
+            catch (Exception exception)
+            {
+                var permanent = exception is ArgumentException or FormatException;
+                ApplyFailure(delivery, exception.GetType().Name, permanent, now);
                 logger.LogWarning(
-                    "Push delivery {DeliveryId} failed after {Attempts} attempts: {ProviderError}",
-                    delivery.Id,
-                    delivery.Attempts,
-                    result.Error);
-            }
-            else
-            {
-                delivery.Status = DeliveryStatus.Retry;
-                delivery.LastError = result.Error;
-                delivery.NextAttemptAt = now.AddSeconds(Math.Min(300, Math.Pow(2, delivery.Attempts)));
+                    exception,
+                    "Push delivery {DeliveryId} failed during payload preparation or provider dispatch",
+                    delivery.Id);
             }
 
             await db.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    private void ApplyProviderResult(PushDelivery delivery, ProviderResult result, DateTimeOffset now)
+    {
+        if (result.Success)
+        {
+            delivery.Status = DeliveryStatus.Delivered;
+            delivery.DeliveredAt = now;
+            delivery.ProviderMessageId = result.MessageId;
+            delivery.LastError = null;
+            return;
+        }
+
+        ApplyFailure(delivery, result.Error, result.PermanentFailure, now);
+    }
+
+    private void ApplyFailure(PushDelivery delivery, string? error, bool permanent, DateTimeOffset now)
+    {
+        if (permanent || delivery.Attempts >= options.Value.MaxAttempts)
+        {
+            delivery.Status = DeliveryStatus.Failed;
+            delivery.LastError = error;
+            if (permanent)
+            {
+                delivery.Subscription.ExpiresAt = now;
+            }
+
+            logger.LogWarning(
+                "Push delivery {DeliveryId} failed after {Attempts} attempts: {ProviderError}",
+                delivery.Id,
+                delivery.Attempts,
+                error);
+            return;
+        }
+
+        delivery.Status = DeliveryStatus.Retry;
+        delivery.LastError = error;
+        delivery.NextAttemptAt = now.AddSeconds(Math.Min(300, Math.Pow(2, delivery.Attempts)));
     }
 }

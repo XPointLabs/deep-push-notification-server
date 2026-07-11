@@ -14,7 +14,10 @@ public sealed record SubscribeRequest(
     [property: JsonPropertyName("sig_ts")] long SigTs,
     [property: JsonPropertyName("signature")] string Signature,
     [property: JsonPropertyName("service_info")] ServiceInfo ServiceInfo,
-    [property: JsonPropertyName("enc_key")] string EncKey);
+    [property: JsonPropertyName("enc_key")] string EncKey,
+    [property: JsonPropertyName("app_id")] string AppId,
+    [property: JsonPropertyName("app_version")] string AppVersion,
+    [property: JsonPropertyName("sig_v")] int SigVersion);
 
 public sealed record UnsubscribeRequest(
     [property: JsonPropertyName("pubkey")] string Pubkey,
@@ -22,7 +25,8 @@ public sealed record UnsubscribeRequest(
     [property: JsonPropertyName("service")] string Service,
     [property: JsonPropertyName("sig_ts")] long SigTs,
     [property: JsonPropertyName("signature")] string Signature,
-    [property: JsonPropertyName("service_info")] ServiceInfo ServiceInfo);
+    [property: JsonPropertyName("service_info")] ServiceInfo ServiceInfo,
+    [property: JsonPropertyName("sig_v")] int SigVersion);
 
 public sealed record NotifyRequest(
     [property: JsonPropertyName("pubkey")] string Pubkey,
@@ -36,7 +40,8 @@ public sealed record NotifyRequest(
         !string.IsNullOrWhiteSpace(Pubkey) &&
         !string.IsNullOrWhiteSpace(Hash) &&
         Timestamp > 0 &&
-        Expiration > Timestamp;
+        Expiration > Timestamp &&
+        (Data is null || Data.Length <= 8192);
 }
 
 public sealed record OperationResponse(

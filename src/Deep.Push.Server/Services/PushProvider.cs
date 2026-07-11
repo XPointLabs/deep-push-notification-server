@@ -23,6 +23,13 @@ public sealed class FirebasePushProvider(FirebaseAdmin.FirebaseApp app) : IPushP
             return new(false, true, Error: $"Unsupported provider: {subscription.Service}");
         }
 
+        if (payload.Count != 2 || !payload.TryGetValue("enc_payload", out var encryptedPayload) ||
+            !payload.TryGetValue("spns", out var version) || version != PushEnvelopeCrypto.EnvelopeVersion.ToString() ||
+            string.IsNullOrWhiteSpace(encryptedPayload) || encryptedPayload.Length > 8192)
+        {
+            return new(false, true, Error: "Invalid encrypted push payload");
+        }
+
         try
         {
             var messageId = await messaging.SendAsync(new Message

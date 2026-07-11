@@ -23,6 +23,35 @@ Configuration is supplied through ASP.NET Core environment variables:
 
 Never commit a Firebase service-account file or database/internal token.
 
+## Subscription signature v2
+
+`/subscribe` and `/unsubscribe` require `sig_v: 2`. The Ed25519 signature covers a
+versioned, UTF-8 canonical payload whose fields are emitted in this order as
+`name=<utf8-byte-length>:<value>\n`:
+
+```text
+deep.push/subscribe/v2
+pubkey
+sig_ts
+service
+device_token
+enc_key
+want_data
+namespaces
+app_id
+app_version
+```
+
+`/unsubscribe` uses the same framing with `pubkey`, `sig_ts`, `service`, and
+`device_token`. Namespaces are ascending and unique; the server rejects
+non-canonical casing, field values, missing `sig_v`, and legacy v1 signatures.
+
+Deploy v2 clients before enabling a v2-only server fleet, then roll the server
+atomically. The client refuses non-loopback HTTP push endpoints and persists a
+local `RemoteSubscribed` state only after the server confirms the subscribe.
+Loopback HTTP is limited to explicit local integration tests. Windows WNS is
+polling-only until an actual WNS provider is configured server-side.
+
 ## Node authentication
 
 External storage nodes sign the exact request body. The server accepts these headers:

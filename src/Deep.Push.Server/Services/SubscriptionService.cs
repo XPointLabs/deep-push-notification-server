@@ -61,15 +61,26 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
         catch (JsonException) { request = null; }
         if (request is null) return Failure("Invalid subscription request.");
 
+        if (!TryGetTimestamp(request.SigTs, out var timestamp) || !IsCanonicalSubscribeRequest(request, out var namespaces))
+        {
+            return Failure("Subscription signature or parameters are invalid.");
+        }
+
         var now = timeProvider.GetUtcNow();
-        var timestamp = DateTimeOffset.FromUnixTimeSeconds(request.SigTs);
-        var namespaces = request.Namespaces.Distinct().Order().ToArray();
-        if (request.Namespaces.Count == 0 || !request.Namespaces.SequenceEqual(namespaces) ||
-            timestamp < now - SignatureLifetime || timestamp > now + FutureGrace ||
-            !string.Equals(request.Service, "firebase", StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(request.ServiceInfo.Token) || request.ServiceInfo.Token.Length > 4096 ||
-            !IsHex(request.EncKey, 64) ||
-            !SubscriptionSignatureVerifier.VerifySubscribe(request.Pubkey.ToLower(), request.SessionEd25519, request.SigTs, request.Data, namespaces, request.Signature))
+        if (timestamp < now - SignatureLifetime || timestamp > now + FutureGrace ||
+            !SubscriptionSignatureVerifier.VerifySubscribe(
+                request.SigVersion,
+                request.Pubkey,
+                request.SessionEd25519,
+                request.SigTs,
+                request.Data,
+                namespaces,
+                request.Service,
+                request.ServiceInfo.Token,
+                request.EncKey,
+                request.AppId,
+                request.AppVersion,
+                request.Signature))
         {
             return Failure("Subscription signature or parameters are invalid.");
         }
@@ -78,13 +89,13 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
         var subscription = await db.Subscriptions.SingleOrDefaultAsync(x => x.IdentityKey == identity, cancellationToken);
         var added = subscription is null;
         subscription ??= new PushSubscription { Id = Guid.NewGuid(), IdentityKey = identity, Pubkey = string.Empty, SessionEd25519 = string.Empty, NamespacesJson = "[]", Service = string.Empty, DeviceToken = string.Empty, EncryptionKey = string.Empty };
-        subscription.Pubkey = request.Pubkey.ToLower();
-        subscription.SessionEd25519 = request.SessionEd25519.ToLower();
+        subscription.Pubkey = request.Pubkey;
+        subscription.SessionEd25519 = request.SessionEd25519;
         subscription.NamespacesJson = JsonSerializer.Serialize(namespaces);
         subscription.WantData = request.Data;
-        subscription.Service = request.Service.ToLower();
+        subscription.Service = request.Service;
         subscription.DeviceToken = request.ServiceInfo.Token;
-        subscription.EncryptionKey = request.EncKey.ToLower();
+        subscription.EncryptionKey = request.EncKey;
         subscription.SignatureTimestamp = request.SigTs;
         subscription.SubscribedAt = now;
         subscription.ExpiresAt = timestamp + SignatureLifetime;
@@ -100,10 +111,21 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
         catch (JsonException) { request = null; }
         if (request is null) return Failure("Invalid unsubscribe request.");
 
+        if (!TryGetTimestamp(request.SigTs, out var timestamp) || !IsCanonicalUnsubscribeRequest(request))
+        {
+            return Failure("Unsubscribe signature or parameters are invalid.");
+        }
+
         var now = timeProvider.GetUtcNow();
-        var timestamp = DateTimeOffset.FromUnixTimeSeconds(request.SigTs);
         if (Math.Abs((now - timestamp).TotalHours) > 24 ||
-            !SubscriptionSignatureVerifier.VerifyUnsubscribe(request.Pubkey.ToLower(), request.SessionEd25519, request.SigTs, request.Signature))
+            !SubscriptionSignatureVerifier.VerifyUnsubscribe(
+                request.SigVersion,
+                request.Pubkey,
+                request.SessionEd25519,
+                request.SigTs,
+                request.Service,
+                request.ServiceInfo.Token,
+                request.Signature))
         {
             return Failure("Unsubscribe signature or parameters are invalid.");
         }
@@ -127,7 +149,63 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
     }
 
     private static OperationResponse Failure(string message) => new(false, 1, message);
-    private static bool IsHex(string value, int length) => value.Length == length && value.All(Uri.IsHexDigit);
+    private static bool IsCanonicalSubscribeRequest(SubscribeRequest request, out int[] namespaces)
+    {
+        namespaces = [];
+        if (request.SigVersion != SubscriptionSignatureVerifier.SignatureVersion ||
+            request.Namespaces is null || request.Namespaces.Count == 0 ||
+            request.ServiceInfo is null || string.IsNullOrWhiteSpace(request.ServiceInfo.Token) ||
+            request.ServiceInfo.Token.Length > 4096 ||
+            request.ServiceInfo.Token != request.ServiceInfo.Token.Trim() ||
+            !string.Equals(request.Service, "firebase", StringComparison.Ordinal) ||
+            !string.Equals(request.AppId, PushEnvelopeCrypto.PackageName, StringComparison.Ordinal) ||
+            !IsCanonicalAppVersion(request.AppVersion) ||
+            !IsLowerHex(request.Pubkey, 66) || !request.Pubkey.StartsWith("05", StringComparison.Ordinal) ||
+            !IsLowerHex(request.SessionEd25519, 64) || !IsLowerHex(request.EncKey, 64) ||
+            string.IsNullOrWhiteSpace(request.Signature))
+        {
+            return false;
+        }
+
+        namespaces = request.Namespaces.Distinct().Order().ToArray();
+        return request.Namespaces.SequenceEqual(namespaces);
+    }
+
+    private static bool IsCanonicalUnsubscribeRequest(UnsubscribeRequest request) =>
+        request.SigVersion == SubscriptionSignatureVerifier.SignatureVersion &&
+        request.ServiceInfo is not null && !string.IsNullOrWhiteSpace(request.ServiceInfo.Token) &&
+        request.ServiceInfo.Token.Length <= 4096 && request.ServiceInfo.Token == request.ServiceInfo.Token.Trim() &&
+        string.Equals(request.Service, "firebase", StringComparison.Ordinal) &&
+        IsLowerHex(request.Pubkey, 66) && request.Pubkey.StartsWith("05", StringComparison.Ordinal) &&
+        IsLowerHex(request.SessionEd25519, 64) && !string.IsNullOrWhiteSpace(request.Signature);
+
+    private static bool TryGetTimestamp(long value, out DateTimeOffset timestamp)
+    {
+        try
+        {
+            timestamp = DateTimeOffset.FromUnixTimeSeconds(value);
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            timestamp = default;
+            return false;
+        }
+    }
+
+    private static bool IsLowerHex(string? value, int length) =>
+        value is { Length: var actualLength } && actualLength == length &&
+        value.All(static character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsCanonicalAppVersion(string? value) =>
+        value is { Length: > 0 and <= 64 }
+        && value == value.Trim()
+        && value.All(static character =>
+            character is >= '0' and <= '9'
+                or >= 'a' and <= 'z'
+                or >= 'A' and <= 'Z'
+                or '.' or '-' or '_' or '+');
+
     private static string IdentityKey(string pubkey, string service, string token) =>
         $"{pubkey.ToLowerInvariant()}:{service.ToLowerInvariant()}:{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)))}";
 }
