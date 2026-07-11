@@ -58,8 +58,11 @@ public sealed class NotificationPayloadEncoder
         {
             message_hash = delivery.MessageHash,
             @namespace = delivery.Namespace,
-            timestamp = delivery.MessageTimestamp,
-            expiration = delivery.Expiration,
+            timestamp = NormalizeUnixSeconds(delivery.MessageTimestamp),
+            expiration = NormalizeUnixSeconds(delivery.Expiration),
             data = data is { Length: > 0 } ? Convert.ToBase64String(data) : null
         });
+
+    private static long NormalizeUnixSeconds(long value) =>
+        value >= 10_000_000_000L ? value / 1_000L : value;
 }

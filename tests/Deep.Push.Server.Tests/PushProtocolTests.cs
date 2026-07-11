@@ -199,6 +199,31 @@ public sealed class PushProtocolTests
         Assert.False(PushEnvelopeCrypto.TryDecrypt("plaintext"u8.ToArray(), key, binding, subscription.Pubkey, out _));
     }
 
+    [Fact]
+    public void NotificationPayload_NormalizesStorageMillisecondsToProtocolSeconds()
+    {
+        var key = SodiumCore.GetRandomBytes(32);
+        var subscription = new PushSubscription
+        {
+            Id = Guid.NewGuid(), IdentityKey = "key", Pubkey = "05" + new string('1', 64), SessionEd25519 = new string('2', 64),
+            NamespacesJson = "[0]", WantData = false, Service = "firebase", DeviceToken = "device", EncryptionKey = Convert.ToHexStringLower(key)
+        };
+        var delivery = new PushDelivery
+        {
+            Id = Guid.NewGuid(), SubscriptionId = subscription.Id, Subscription = subscription, MessageHash = "hash", Namespace = 0,
+            MessageTimestamp = 1_800_000_000_123, Expiration = 1_801_209_600_987, Status = DeliveryStatus.Pending
+        };
+
+        var encoded = new NotificationPayloadEncoder().Encode(subscription, delivery);
+        var envelope = Convert.FromBase64String(encoded["enc_payload"]);
+        var binding = PushEnvelopeCrypto.ComputeSubscriptionBinding(subscription.Pubkey, subscription.Service, subscription.DeviceToken);
+        Assert.True(PushEnvelopeCrypto.TryDecrypt(envelope, key, binding, subscription.Pubkey, out var plaintext));
+
+        var payload = JsonSerializer.Deserialize<JsonElement>(plaintext);
+        Assert.Equal(1_800_000_000, payload.GetProperty("timestamp").GetInt64());
+        Assert.Equal(1_801_209_600, payload.GetProperty("expiration").GetInt64());
+    }
+
     private static PushDbContext CreateDatabase()
     {
         var options = new DbContextOptionsBuilder<PushDbContext>()
