@@ -24,9 +24,24 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
-builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.Section));
+builder.Services
+    .AddOptions<PushOptions>()
+    .Bind(builder.Configuration.GetSection(PushOptions.Section))
+    .Validate(
+        static options => !options.WnsEnabled || options.IsWnsConfigured,
+        "Enabled WNS requires valid tenant/client GUIDs and exactly one bounded client-secret source. The configured secret file must exist.")
+    .ValidateOnStart();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<NodeRegistryClient>();
+builder.Services.AddHttpClient("WnsOAuth", client =>
+{
+    client.BaseAddress = new Uri("https://login.microsoftonline.com/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient("WnsDelivery", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<SubscriptionService>();
 builder.Services.AddScoped<NotifyAuthorizationService>();
 builder.Services.AddSingleton<NotificationPayloadEncoder>();
@@ -41,12 +56,12 @@ if (!string.IsNullOrWhiteSpace(firebaseCredentialsPath))
     {
         Credential = CredentialFactory.FromFile<ServiceAccountCredential>(firebaseCredentialsPath).ToGoogleCredential()
     }));
-    builder.Services.AddSingleton<IPushProvider, FirebasePushProvider>();
+    builder.Services.AddSingleton<IPlatformPushProvider, FirebasePushProvider>();
 }
-else
-{
-    builder.Services.AddSingleton<IPushProvider, DisabledPushProvider>();
-}
+
+builder.Services.AddSingleton<IWnsAccessTokenProvider, WnsAccessTokenProvider>();
+builder.Services.AddSingleton<IPlatformPushProvider, WnsPushProvider>();
+builder.Services.AddSingleton<IPushProvider, PushProviderRouter>();
 
 builder.Services.AddHostedService<DeliveryWorker>();
 

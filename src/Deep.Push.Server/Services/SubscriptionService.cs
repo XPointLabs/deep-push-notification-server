@@ -5,13 +5,24 @@ using Deep.Push.Server.Data;
 using Deep.Push.Server.Models;
 using Deep.Push.Server.Security;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Deep.Push.Server.Services;
 
-public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvider)
+public sealed class SubscriptionService(
+    PushDbContext db,
+    TimeProvider timeProvider,
+    IOptions<PushOptions> options)
 {
     private static readonly TimeSpan SignatureLifetime = TimeSpan.FromDays(14);
+    private static readonly TimeSpan FirebaseSubscriptionLifetime = TimeSpan.FromDays(14);
+    private static readonly TimeSpan WnsSubscriptionLifetime = TimeSpan.FromDays(30);
     private static readonly TimeSpan FutureGrace = TimeSpan.FromDays(1);
+
+    public SubscriptionService(PushDbContext db, TimeProvider timeProvider)
+        : this(db, timeProvider, Options.Create(new PushOptions()))
+    {
+    }
 
     public Task<object> SubscribeAsync(JsonElement payload, CancellationToken cancellationToken) =>
         ProcessAsync(payload, SubscribeOneAsync, cancellationToken);
@@ -98,7 +109,7 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
         subscription.EncryptionKey = request.EncKey;
         subscription.SignatureTimestamp = request.SigTs;
         subscription.SubscribedAt = now;
-        subscription.ExpiresAt = timestamp + SignatureLifetime;
+        subscription.ExpiresAt = timestamp + GetSubscriptionLifetime(request.Service);
         if (added) db.Subscriptions.Add(subscription);
         await db.SaveChangesAsync(cancellationToken);
         return new(true, 0, Added: added);
@@ -149,7 +160,7 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
     }
 
     private static OperationResponse Failure(string message) => new(false, 1, message);
-    private static bool IsCanonicalSubscribeRequest(SubscribeRequest request, out int[] namespaces)
+    private bool IsCanonicalSubscribeRequest(SubscribeRequest request, out int[] namespaces)
     {
         namespaces = [];
         if (request.SigVersion != SubscriptionSignatureVerifier.SignatureVersion ||
@@ -157,7 +168,7 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
             request.ServiceInfo is null || string.IsNullOrWhiteSpace(request.ServiceInfo.Token) ||
             request.ServiceInfo.Token.Length > 4096 ||
             request.ServiceInfo.Token != request.ServiceInfo.Token.Trim() ||
-            !string.Equals(request.Service, "firebase", StringComparison.Ordinal) ||
+            !IsCanonicalServiceToken(request.Service, request.ServiceInfo.Token) ||
             !string.Equals(request.AppId, PushEnvelopeCrypto.PackageName, StringComparison.Ordinal) ||
             !IsCanonicalAppVersion(request.AppVersion) ||
             !IsLowerHex(request.Pubkey, 66) || !request.Pubkey.StartsWith("05", StringComparison.Ordinal) ||
@@ -171,11 +182,11 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
         return request.Namespaces.SequenceEqual(namespaces);
     }
 
-    private static bool IsCanonicalUnsubscribeRequest(UnsubscribeRequest request) =>
+    private bool IsCanonicalUnsubscribeRequest(UnsubscribeRequest request) =>
         request.SigVersion == SubscriptionSignatureVerifier.SignatureVersion &&
         request.ServiceInfo is not null && !string.IsNullOrWhiteSpace(request.ServiceInfo.Token) &&
         request.ServiceInfo.Token.Length <= 4096 && request.ServiceInfo.Token == request.ServiceInfo.Token.Trim() &&
-        string.Equals(request.Service, "firebase", StringComparison.Ordinal) &&
+        IsCanonicalServiceToken(request.Service, request.ServiceInfo.Token) &&
         IsLowerHex(request.Pubkey, 66) && request.Pubkey.StartsWith("05", StringComparison.Ordinal) &&
         IsLowerHex(request.SessionEd25519, 64) && !string.IsNullOrWhiteSpace(request.Signature);
 
@@ -205,6 +216,19 @@ public sealed class SubscriptionService(PushDbContext db, TimeProvider timeProvi
                 or >= 'a' and <= 'z'
                 or >= 'A' and <= 'Z'
                 or '.' or '-' or '_' or '+');
+
+    private bool IsCanonicalServiceToken(string? service, string token) =>
+        service switch
+        {
+            "firebase" => token.Length is > 0 and <= 4096,
+            "wns" => options.Value.WnsEnabled && WnsChannelUriValidator.IsValid(token),
+            _ => false
+        };
+
+    private static TimeSpan GetSubscriptionLifetime(string service) =>
+        string.Equals(service, "wns", StringComparison.Ordinal)
+            ? WnsSubscriptionLifetime
+            : FirebaseSubscriptionLifetime;
 
     private static string IdentityKey(string pubkey, string service, string token) =>
         $"{pubkey.ToLowerInvariant()}:{service.ToLowerInvariant()}:{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)))}";

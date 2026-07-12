@@ -5,6 +5,7 @@ using Deep.Push.Server.Models;
 using Deep.Push.Server.Security;
 using Deep.Push.Server.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Sodium;
 
 namespace Deep.Push.Server.Tests;
@@ -109,6 +110,59 @@ public sealed class PushProtocolTests
 
         Assert.True(accepted.Success);
         Assert.False(rejected.Success);
+    }
+
+    [Fact]
+    public async Task SubscriptionService_AcceptsOnlySignedCanonicalWnsChannels()
+    {
+        await using var db = CreateDatabase();
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+        var identity = TestIdentity.Create();
+        var service = new SubscriptionService(
+            db,
+            new FixedTimeProvider(now),
+            Options.Create(new PushOptions { WnsEnabled = true }));
+        const string channel = "https://wns2-by3p.notify.windows.com/?token=opaque";
+
+        var accepted = Assert.IsType<OperationResponse>(await service.SubscribeAsync(
+            JsonSerializer.SerializeToElement(identity.SubscribeRequest(
+                now.ToUnixTimeSeconds(),
+                [0],
+                service: "wns",
+                token: channel)),
+            default));
+        var rejected = Assert.IsType<OperationResponse>(await service.SubscribeAsync(
+            JsonSerializer.SerializeToElement(identity.SubscribeRequest(
+                now.ToUnixTimeSeconds(),
+                [0],
+                service: "wns",
+                token: "https://notify.windows.com.evil.example/?token=opaque")),
+            default));
+
+        Assert.True(accepted.Success);
+        Assert.False(rejected.Success);
+        var subscription = Assert.Single(await db.Subscriptions.ToListAsync());
+        Assert.Equal(now.AddDays(30), subscription.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task SubscriptionService_RejectsWnsWhileProviderIsDisabled()
+    {
+        await using var db = CreateDatabase();
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+        var identity = TestIdentity.Create();
+        var service = new SubscriptionService(db, new FixedTimeProvider(now));
+
+        var response = Assert.IsType<OperationResponse>(await service.SubscribeAsync(
+            JsonSerializer.SerializeToElement(identity.SubscribeRequest(
+                now.ToUnixTimeSeconds(),
+                [0],
+                service: "wns",
+                token: "https://wns2-by3p.notify.windows.com/?token=opaque")),
+            default));
+
+        Assert.False(response.Success);
+        Assert.Empty(await db.Subscriptions.ToListAsync());
     }
 
     [Fact]
@@ -246,10 +300,13 @@ public sealed class PushProtocolTests
             return new("05" + Convert.ToHexStringLower(x25519), Convert.ToHexStringLower(pair.PublicKey), pair.PrivateKey);
         }
 
-        public SubscribeRequest SubscribeRequest(long timestamp, int[] namespaces, string appVersion = TestAppVersion)
+        public SubscribeRequest SubscribeRequest(
+            long timestamp,
+            int[] namespaces,
+            string appVersion = TestAppVersion,
+            string service = "firebase",
+            string token = "firebase-device-token")
         {
-            const string service = "firebase";
-            const string token = "firebase-device-token";
             var encryptionKey = Convert.ToHexStringLower(SodiumCore.GetRandomBytes(32));
             var message = CreateSubscribeCanonical(
                 SessionId,

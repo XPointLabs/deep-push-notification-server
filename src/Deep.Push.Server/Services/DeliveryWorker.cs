@@ -53,7 +53,7 @@ public sealed class DeliveryWorker(
                 await db.SaveChangesAsync(cancellationToken);
 
                 var payload = encoder.Encode(delivery.Subscription, delivery);
-                var result = await provider.SendAsync(delivery.Subscription, payload, cancellationToken);
+                var result = await provider.SendAsync(delivery.Subscription, delivery, payload, cancellationToken);
                 ApplyProviderResult(delivery, result, now);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -85,16 +85,28 @@ public sealed class DeliveryWorker(
             return;
         }
 
-        ApplyFailure(delivery, result.Error, result.PermanentFailure, now);
+        ApplyFailure(
+            delivery,
+            result.Error,
+            result.PermanentFailure,
+            now,
+            result.InvalidateSubscription,
+            result.RetryAfter);
     }
 
-    private void ApplyFailure(PushDelivery delivery, string? error, bool permanent, DateTimeOffset now)
+    private void ApplyFailure(
+        PushDelivery delivery,
+        string? error,
+        bool permanent,
+        DateTimeOffset now,
+        bool invalidateSubscription = false,
+        TimeSpan? retryAfter = null)
     {
         if (permanent || delivery.Attempts >= options.Value.MaxAttempts)
         {
             delivery.Status = DeliveryStatus.Failed;
             delivery.LastError = error;
-            if (permanent)
+            if (invalidateSubscription)
             {
                 delivery.Subscription.ExpiresAt = now;
             }
@@ -109,6 +121,9 @@ public sealed class DeliveryWorker(
 
         delivery.Status = DeliveryStatus.Retry;
         delivery.LastError = error;
-        delivery.NextAttemptAt = now.AddSeconds(Math.Min(300, Math.Pow(2, delivery.Attempts)));
+        var delay = retryAfter is { } requestedDelay && requestedDelay > TimeSpan.Zero
+            ? requestedDelay
+            : TimeSpan.FromSeconds(Math.Min(300, Math.Pow(2, delivery.Attempts)));
+        delivery.NextAttemptAt = now.Add(delay > TimeSpan.FromMinutes(30) ? TimeSpan.FromMinutes(30) : delay);
     }
 }
